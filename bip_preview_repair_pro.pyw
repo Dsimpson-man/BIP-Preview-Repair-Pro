@@ -12,11 +12,28 @@ import winreg
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 
-APP_TITLE = "BIP 预览修复助手 Pro"
-APP_VERSION = "2.0.0"
-DLL_NAME = "KeyShot-ih.dll"
+APP_TITLE = "缩略图修复助手 Pro"
+APP_VERSION = "2.2.0"
+KEYSHOT_DLL_NAME = "KeyShot-ih.dll"
+RHINO_DLL_NAME = "RhinoHandlers.dll"
 KEYSHOT_ICON_HANDLER_CLSID = "{7FA698E6-F685-4536-B5CF-93F704102025}"
+THUMBNAIL_HANDLER_KEY = "{E357FCCD-A995-4576-B01F-234630154E96}"
 ASSOC_CHANGED = 0x08000000
+
+MODULES = {
+    "keyshot": {
+        "label": "KeyShot .bip",
+        "extension": ".bip",
+        "dll": KEYSHOT_DLL_NAME,
+        "kind": "KeyShot",
+    },
+    "rhino": {
+        "label": "Rhino .3dm",
+        "extension": ".3dm",
+        "dll": RHINO_DLL_NAME,
+        "kind": "Rhino",
+    },
+}
 
 
 def app_base_dir():
@@ -68,7 +85,7 @@ def relaunch_as_admin():
     sys.exit(0)
 
 
-def normalize_install_path(path):
+def normalize_keyshot_install_path(path):
     if not path:
         return None
 
@@ -88,10 +105,36 @@ def normalize_install_path(path):
         if not candidate:
             continue
         candidate = os.path.abspath(candidate)
-        dll_path = os.path.join(candidate, "bin", DLL_NAME)
+        dll_path = os.path.join(candidate, "bin", KEYSHOT_DLL_NAME)
         if os.path.isfile(dll_path):
             return candidate
 
+    return None
+
+
+def normalize_rhino_install_path(path):
+    if not path:
+        return None
+
+    path = os.path.expandvars(str(path).strip().strip('"'))
+    if not path:
+        return None
+
+    if path.lower().endswith(".exe") or path.lower().endswith(".dll"):
+        path = os.path.dirname(path)
+
+    candidates = [
+        path,
+        os.path.dirname(path),
+        os.path.dirname(os.path.dirname(path)),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        dll_path = os.path.join(candidate, "System", RHINO_DLL_NAME)
+        if os.path.isfile(dll_path):
+            return candidate
     return None
 
 
@@ -102,8 +145,8 @@ def make_display_name(path):
     return path
 
 
-def add_found(found, path, source):
-    install_path = normalize_install_path(path)
+def add_found_keyshot(found, path, source):
+    install_path = normalize_keyshot_install_path(path)
     if not install_path:
         return
     key = os.path.normcase(os.path.normpath(install_path))
@@ -111,7 +154,22 @@ def add_found(found, path, source):
         "name": make_display_name(install_path),
         "path": install_path,
         "source": source,
-        "dll": os.path.join(install_path, "bin", DLL_NAME),
+        "dll": os.path.join(install_path, "bin", KEYSHOT_DLL_NAME),
+        "module": "keyshot",
+    }
+
+
+def add_found_rhino(found, path, source):
+    install_path = normalize_rhino_install_path(path)
+    if not install_path:
+        return
+    key = os.path.normcase(os.path.normpath(install_path))
+    found[key] = {
+        "name": make_display_name(install_path),
+        "path": install_path,
+        "source": source,
+        "dll": os.path.join(install_path, "System", RHINO_DLL_NAME),
+        "module": "rhino",
     }
 
 
@@ -124,7 +182,7 @@ def read_registry_value(root, path, value_name):
         return None
 
 
-def scan_registry(found):
+def scan_keyshot_registry(found):
     roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
     uninstall_paths = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -142,7 +200,7 @@ def scan_registry(found):
             for value_name in ("InstallDir", "InstallLocation", "Path", ""):
                 value = read_registry_value(root, reg_path, value_name)
                 if value:
-                    add_found(found, value, "注册表")
+                    add_found_keyshot(found, value, "注册表")
 
         for uninstall_root in uninstall_paths:
             try:
@@ -158,14 +216,14 @@ def scan_registry(found):
                             for value_name in ("InstallLocation", "InstallDir", "DisplayIcon", "UninstallString"):
                                 value = read_registry_value(root, sub_path, value_name)
                                 if value:
-                                    add_found(found, value.split(",")[0], "卸载信息")
+                                    add_found_keyshot(found, value.split(",")[0], "卸载信息")
                         except Exception:
                             continue
             except Exception:
                 continue
 
 
-def scan_common_folders(found):
+def scan_keyshot_common_folders(found):
     roots = []
     for env_name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
         value = os.environ.get(env_name)
@@ -191,10 +249,10 @@ def scan_common_folders(found):
             for item in os.listdir(root):
                 full = os.path.join(root, item)
                 if os.path.isdir(full) and ("keyshot" in item.lower() or "luxion" in item.lower()):
-                    add_found(found, full, "常见目录")
+                    add_found_keyshot(found, full, "常见目录")
                     try:
                         for sub_item in os.listdir(full):
-                            add_found(found, os.path.join(full, sub_item), "常见目录")
+                            add_found_keyshot(found, os.path.join(full, sub_item), "常见目录")
                     except Exception:
                         pass
         except Exception:
@@ -203,8 +261,71 @@ def scan_common_folders(found):
 
 def scan_keyshot_installations():
     found = {}
-    scan_registry(found)
-    scan_common_folders(found)
+    scan_keyshot_registry(found)
+    scan_keyshot_common_folders(found)
+    result = list(found.values())
+    result.sort(key=lambda item: item["path"].lower())
+    return result
+
+
+def scan_rhino_installations():
+    found = {}
+    roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+    uninstall_paths = [
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ]
+    for root in roots:
+        for uninstall_root in uninstall_paths:
+            try:
+                with winreg.OpenKey(root, uninstall_root, 0, winreg.KEY_READ) as key:
+                    count = winreg.QueryInfoKey(key)[0]
+                    for index in range(count):
+                        try:
+                            sub_name = winreg.EnumKey(key, index)
+                            sub_path = uninstall_root + "\\" + sub_name
+                            display_name = read_registry_value(root, sub_path, "DisplayName")
+                            if not display_name or ("rhino" not in display_name.lower() and "rhinoceros" not in display_name.lower()):
+                                continue
+                            for value_name in ("InstallLocation", "InstallDir", "DisplayIcon", "UninstallString"):
+                                value = read_registry_value(root, sub_path, value_name)
+                                if value:
+                                    add_found_rhino(found, value.split(",")[0], "卸载信息")
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+    roots_to_scan = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        value = os.environ.get(env_name)
+        if value and os.path.isdir(value):
+            roots_to_scan.append(value)
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = letter + ":\\"
+        if os.path.isdir(drive):
+            roots_to_scan.append(drive)
+
+    seen = set()
+    for root in roots_to_scan:
+        key = os.path.normcase(os.path.normpath(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            for item in os.listdir(root):
+                full = os.path.join(root, item)
+                lower = item.lower()
+                if os.path.isdir(full) and ("rhino" in lower or "rhinoceros" in lower):
+                    add_found_rhino(found, full, "常见目录")
+                    try:
+                        for sub_item in os.listdir(full):
+                            add_found_rhino(found, os.path.join(full, sub_item), "常见目录")
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+
     result = list(found.values())
     result.sort(key=lambda item: item["path"].lower())
     return result
@@ -218,8 +339,7 @@ def get_regsvr32_path():
     return "regsvr32.exe"
 
 
-def register_preview_dll(install_path):
-    dll_path = os.path.join(install_path, "bin", DLL_NAME)
+def register_preview_dll(dll_path):
     if not os.path.isfile(dll_path):
         return False, "没有找到 DLL：" + dll_path
 
@@ -282,11 +402,11 @@ def registry_key_values(root, path):
     return values
 
 
-def user_choice_prog_id():
+def user_choice_prog_id(extension):
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.bip\UserChoice",
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{}\UserChoice".format(extension),
             0,
             winreg.KEY_READ,
         ) as key:
@@ -301,19 +421,25 @@ def registry_set_default(path, value):
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, value)
 
 
-def export_registry_snapshot():
-    active = get_active_keyshot_handler_info()
+def export_registry_snapshot(module_key="keyshot"):
+    module = MODULES[module_key]
+    active = get_active_handler_info(module_key)
+    extension = module["extension"]
     paths = [
-        r".bip",
+        extension,
         r"KeyShot.Document",
         r"KeyShot.Document\ShellEx\IconHandler",
         r"Applications\keyshot.exe",
         r"Applications\keyshot.exe\ShellEx\IconHandler",
         r"CLSID\{}\InProcServer32".format(KEYSHOT_ICON_HANDLER_CLSID),
+        r"Rhino3DFile",
+        r"Rhino3DFile\ShellEx",
+        r"Applications\rhino.exe",
     ]
     snapshot = {
         "app": APP_TITLE,
         "version": APP_VERSION,
+        "module": module["label"],
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "active": active,
         "hkcr": {},
@@ -323,31 +449,34 @@ def export_registry_snapshot():
         snapshot["hkcr"][path] = registry_key_values(winreg.HKEY_CLASSES_ROOT, path)
     snapshot["hkcu_user_choice"] = registry_key_values(
         winreg.HKEY_CURRENT_USER,
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.bip\UserChoice",
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{}\UserChoice".format(extension),
     )
     return snapshot
 
 
-def save_registry_backup():
-    path = os.path.join(logs_dir(), "registry-backup-{}.json".format(timestamp()))
+def save_registry_backup(module_key="keyshot"):
+    path = os.path.join(logs_dir(), "registry-backup-{}-{}.json".format(module_key, timestamp()))
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(export_registry_snapshot(), f, ensure_ascii=False, indent=2)
+        json.dump(export_registry_snapshot(module_key), f, ensure_ascii=False, indent=2)
     return path
 
 
-def export_diagnostic_report(items, log_lines):
-    report_path = os.path.join(logs_dir(), "diagnostic-report-{}.txt".format(timestamp()))
-    active = get_active_keyshot_handler_info()
+def export_diagnostic_report(module_key, items, log_lines):
+    module = MODULES[module_key]
+    report_path = os.path.join(logs_dir(), "diagnostic-report-{}-{}.txt".format(module_key, timestamp()))
+    active = get_active_handler_info(module_key)
     lines = [
         "{} {}".format(APP_TITLE, APP_VERSION),
         "生成时间：{}".format(time.strftime("%Y-%m-%d %H:%M:%S")),
-        "说明：本工具为独立工具，不包含、不分发 KeyShot 官方文件。",
+        "说明：本工具为独立工具，不包含、不分发软件官方文件。",
+        "当前模块：{}".format(module["label"]),
         "",
         "当前关联",
-        "HKCR .bip 类型：{}".format(active["prog_id"]),
+        "HKCR {} 类型：{}".format(module["extension"], active["prog_id"]),
         "用户默认打开方式：{}".format(active["user_choice"]),
         "资源管理器实际使用类型：{}".format(active["active_prog_id"]),
         "当前图标处理器：{}".format(active["icon_handler"]),
+        "当前缩略图处理器：{}".format(active["thumbnail_handler"]),
         "当前生效 DLL：{}".format(active["inproc"]),
         "",
         "扫描到的安装目录",
@@ -371,7 +500,7 @@ def ensure_bip_file_association():
         registry_set_default(r".bip", prog_id)
 
     target_prog_ids = [prog_id]
-    choice = user_choice_prog_id()
+    choice = user_choice_prog_id(".bip")
     if choice and choice not in target_prog_ids:
         target_prog_ids.append(choice)
 
@@ -392,18 +521,22 @@ def ensure_bip_file_association():
     return True, "图标处理器关联正常：{}".format("、".join(normal or target_prog_ids))
 
 
-def get_active_keyshot_handler_info():
-    prog_id = registry_get_default(r".bip") or "未设置"
-    choice = user_choice_prog_id()
+def get_active_handler_info(module_key):
+    module = MODULES[module_key]
+    extension = module["extension"]
+    prog_id = registry_get_default(extension) or "未设置"
+    choice = user_choice_prog_id(extension)
     active_prog_id = choice or prog_id
     icon_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\IconHandler") if active_prog_id != "未设置" else None
-    clsid = icon_handler or "未设置"
-    inproc = registry_get_default(r"CLSID\{}\InProcServer32".format(clsid)) if icon_handler else None
+    thumbnail_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\{}".format(THUMBNAIL_HANDLER_KEY)) if active_prog_id != "未设置" else None
+    clsid = icon_handler or thumbnail_handler or "未设置"
+    inproc = registry_get_default(r"CLSID\{}\InProcServer32".format(clsid)) if clsid != "未设置" else None
     return {
         "prog_id": prog_id,
         "user_choice": choice or "未设置",
         "active_prog_id": active_prog_id,
-        "icon_handler": clsid,
+        "icon_handler": icon_handler or "未设置",
+        "thumbnail_handler": thumbnail_handler or "未设置",
         "inproc": inproc or "未设置",
     }
 
@@ -455,11 +588,12 @@ class FixerApp:
         self.items = []
         self.log_lines = []
         self.worker_running = False
+        self.current_module = tk.StringVar(value=MODULES["keyshot"]["label"])
 
         self.build_style()
         self.build_ui()
         self.log("欢迎使用 {} v{}。建议按左侧 5 步流程操作。".format(APP_TITLE, APP_VERSION))
-        self.log("本工具不会包含或分发 KeyShot 官方文件，只调用本机已安装组件。")
+        self.log("本工具不会包含或分发软件官方文件，只调用本机已安装组件。")
         self.poll_queue()
 
     def build_style(self):
@@ -563,6 +697,20 @@ class FixerApp:
         action_card.pack(fill=tk.X)
         ttk.Label(action_card, text="操作面板", style="Section.TLabel").pack(anchor=tk.W, pady=(0, 10))
 
+        module_row = ttk.Frame(action_card, style="Card.TFrame")
+        module_row.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(module_row, text="修复模块", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        self.module_combo = ttk.Combobox(
+            module_row,
+            textvariable=self.current_module,
+            values=[MODULES[key]["label"] for key in MODULES],
+            state="readonly",
+            width=16,
+        )
+        self.module_combo.pack(side=tk.LEFT)
+        self.module_combo.bind("<<ComboboxSelected>>", self.on_module_changed)
+        ttk.Label(module_row, text="KeyShot .bip / Rhino .3dm", style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0))
+
         row1 = ttk.Frame(action_card, style="Card.TFrame")
         row1.pack(fill=tk.X)
         self.scan_btn = ttk.Button(row1, text="自动扫描", command=self.scan_versions)
@@ -595,7 +743,8 @@ class FixerApp:
 
         list_card = ttk.Frame(right, style="Card.TFrame", padding=14)
         list_card.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
-        ttk.Label(list_card, text="已发现的 KeyShot 安装目录", style="Section.TLabel").pack(anchor=tk.W)
+        self.list_title = ttk.Label(list_card, text="已发现的安装目录", style="Section.TLabel")
+        self.list_title.pack(anchor=tk.W)
         list_frame = ttk.Frame(list_card, style="Card.TFrame")
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
@@ -626,7 +775,7 @@ class FixerApp:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(6, 8))
 
-        self.status_var = tk.StringVar(value="就绪。点击“自动扫描”，或手动添加 KeyShot 安装目录。")
+        self.status_var = tk.StringVar(value="就绪。选择模块后点击“自动扫描”，或手动添加安装目录。")
         status = tk.Label(
             right,
             textvariable=self.status_var,
@@ -638,6 +787,28 @@ class FixerApp:
             font=("Microsoft YaHei UI", 9),
         )
         status.pack(fill=tk.X, pady=(14, 0))
+        self.refresh_module_text()
+
+    def module_label(self):
+        return MODULES[self.current_module_key()]["label"]
+
+    def current_module_key(self):
+        value = self.current_module.get()
+        for key, module in MODULES.items():
+            if value == module["label"] or value == key:
+                return key
+        return "keyshot"
+
+    def refresh_module_text(self):
+        module = MODULES[self.current_module_key()]
+        self.list_title.config(text="已发现的 {} 安装目录".format(module["kind"]))
+        self.status_var.set("当前模块：{}。点击“自动扫描”，或手动添加安装目录。".format(module["label"]))
+
+    def on_module_changed(self, event=None):
+        self.items = []
+        self.update_tree()
+        self.refresh_module_text()
+        self.log("已切换模块：{}".format(self.module_label()))
 
     def add_step(self, parent, number, title, desc):
         row = tk.Frame(parent, bg=self.colors["charcoal"])
@@ -731,11 +902,15 @@ class FixerApp:
         if self.worker_running:
             return
         self.set_busy(True)
-        self.status_var.set("正在扫描 KeyShot 安装目录...")
-        self.log("开始自动扫描。")
+        module_key = self.current_module_key()
+        self.status_var.set("正在扫描 {} 安装目录...".format(self.module_label()))
+        self.log("开始自动扫描：{}。".format(self.module_label()))
 
         def worker():
-            result = scan_keyshot_installations()
+            if module_key == "rhino":
+                result = scan_rhino_installations()
+            else:
+                result = scan_keyshot_installations()
             self.enqueue("scan_done", result)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -745,22 +920,30 @@ class FixerApp:
         self.update_tree()
         self.log("扫描完成，新增 {} 个目录。".format(added))
         if not self.items:
-            self.log("没有自动找到 KeyShot。请点击“手动添加”，选择 KeyShot 安装根目录。")
+            self.log("没有自动找到 {}。请点击“手动添加”，选择安装根目录。".format(self.module_label()))
         self.set_busy(False)
 
     def add_path(self):
-        path = filedialog.askdirectory(title="选择 KeyShot 安装根目录")
+        module_key = self.current_module_key()
+        path = filedialog.askdirectory(title="选择 {} 安装根目录".format(self.module_label()))
         if not path:
             return
-        install_path = normalize_install_path(path)
+        if module_key == "rhino":
+            install_path = normalize_rhino_install_path(path)
+            dll_path = os.path.join(install_path, "System", RHINO_DLL_NAME) if install_path else ""
+        else:
+            install_path = normalize_keyshot_install_path(path)
+            dll_path = os.path.join(install_path, "bin", KEYSHOT_DLL_NAME) if install_path else ""
         if not install_path:
-            messagebox.showerror("路径无效", "所选目录下没有找到 bin\\KeyShot-ih.dll，请选择 KeyShot 安装根目录。")
+            expected = "System\\{}".format(RHINO_DLL_NAME) if module_key == "rhino" else "bin\\{}".format(KEYSHOT_DLL_NAME)
+            messagebox.showerror("路径无效", "所选目录下没有找到 {}，请选择正确的安装根目录。".format(expected))
             return
         item = {
             "name": make_display_name(install_path),
             "path": install_path,
             "source": "手动添加",
-            "dll": os.path.join(install_path, "bin", DLL_NAME),
+            "dll": dll_path,
+            "module": module_key,
         }
         added = self.merge_items([item])
         self.update_tree()
@@ -802,10 +985,11 @@ class FixerApp:
             return
 
         self.set_busy(True)
-        self.status_var.set("正在注册 KeyShot 预览组件...")
-        self.log("开始修复{}项目，共 {} 个目录。".format(label, len(items)))
+        module_key = self.current_module_key()
+        self.status_var.set("正在注册 {} 预览组件...".format(self.module_label()))
+        self.log("开始修复{}项目：{}，共 {} 个目录。".format(label, self.module_label(), len(items)))
         try:
-            backup_path = save_registry_backup()
+            backup_path = save_registry_backup(module_key)
             self.log("已自动备份关键注册表信息：{}".format(backup_path))
         except Exception as exc:
             self.log("注册表备份失败，但修复仍继续：{}".format(exc))
@@ -815,19 +999,25 @@ class FixerApp:
             total = len(items)
             for index, item in enumerate(items, start=1):
                 self.enqueue("log", "({}/{}) 正在处理：{}".format(index, total, item["path"]))
-                ok, message = register_preview_dll(item["path"])
+                ok, message = register_preview_dll(item["dll"])
                 if ok:
                     success += 1
                     self.enqueue("log", "成功：" + message)
                 else:
                     self.enqueue("log", "失败：" + message)
-            ok, message = ensure_bip_file_association()
-            self.enqueue("log", ("成功：" if ok else "失败：") + message)
-            active = get_active_keyshot_handler_info()
-            self.enqueue("log", "HKCR .bip 类型：{}".format(active["prog_id"]))
+            if module_key == "keyshot":
+                ok, message = ensure_bip_file_association()
+                self.enqueue("log", ("成功：" if ok else "失败：") + message)
+            else:
+                refresh_shell_associations()
+                self.enqueue("log", "已刷新 Windows Shell 文件关联。Rhino 的 .3dm 关联通常由 RhinoHandlers.dll 注册时写入。")
+            active = get_active_handler_info(module_key)
+            extension = MODULES[module_key]["extension"]
+            self.enqueue("log", "HKCR {} 类型：{}".format(extension, active["prog_id"]))
             self.enqueue("log", "用户默认打开方式：{}".format(active["user_choice"]))
             self.enqueue("log", "资源管理器实际使用类型：{}".format(active["active_prog_id"]))
             self.enqueue("log", "当前图标处理器：{}".format(active["icon_handler"]))
+            self.enqueue("log", "当前缩略图处理器：{}".format(active["thumbnail_handler"]))
             self.enqueue("log", "当前生效 DLL：{}".format(active["inproc"]))
             self.enqueue("fix_done", {"success": success, "total": total})
 
@@ -835,19 +1025,25 @@ class FixerApp:
 
     def diagnose_association(self):
         try:
-            active = get_active_keyshot_handler_info()
-            self.log("HKCR .bip 类型：{}".format(active["prog_id"]))
+            module_key = self.current_module_key()
+            extension = MODULES[module_key]["extension"]
+            active = get_active_handler_info(module_key)
+            self.log("HKCR {} 类型：{}".format(extension, active["prog_id"]))
             self.log("用户默认打开方式：{}".format(active["user_choice"]))
             self.log("资源管理器实际使用类型：{}".format(active["active_prog_id"]))
             self.log("当前图标处理器：{}".format(active["icon_handler"]))
+            self.log("当前缩略图处理器：{}".format(active["thumbnail_handler"]))
             self.log("当前生效 DLL：{}".format(active["inproc"]))
             messagebox.showinfo(
                 APP_TITLE,
-                "HKCR .bip 类型：{}\n用户默认打开方式：{}\n资源管理器实际使用类型：{}\n当前图标处理器：{}\n当前生效 DLL：{}".format(
+                "当前模块：{}\nHKCR {} 类型：{}\n用户默认打开方式：{}\n资源管理器实际使用类型：{}\n当前图标处理器：{}\n当前缩略图处理器：{}\n当前生效 DLL：{}".format(
+                    self.module_label(),
+                    extension,
                     active["prog_id"],
                     active["user_choice"],
                     active["active_prog_id"],
                     active["icon_handler"],
+                    active["thumbnail_handler"],
                     active["inproc"],
                 ),
             )
@@ -857,7 +1053,7 @@ class FixerApp:
 
     def export_report(self):
         try:
-            path = export_diagnostic_report(self.items, self.log_lines)
+            path = export_diagnostic_report(self.current_module_key(), self.items, self.log_lines)
             self.log("已导出诊断报告：{}".format(path))
             messagebox.showinfo(APP_TITLE, "诊断报告已导出：\n{}".format(path))
         except Exception as exc:
@@ -866,7 +1062,7 @@ class FixerApp:
 
     def backup_registry(self):
         try:
-            path = save_registry_backup()
+            path = save_registry_backup(self.current_module_key())
             self.log("已备份关键注册表信息：{}".format(path))
             messagebox.showinfo(APP_TITLE, "注册表备份已保存：\n{}".format(path))
         except Exception as exc:
@@ -921,6 +1117,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
