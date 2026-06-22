@@ -13,9 +13,10 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 
 APP_TITLE = "缩略图修复助手 Pro"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.1"
 KEYSHOT_DLL_NAME = "KeyShot-ih.dll"
 RHINO_DLL_NAME = "RhinoHandlers.dll"
+BLENDER_DLL_NAME = "BlendThumb.dll"
 KEYSHOT_ICON_HANDLER_CLSID = "{7FA698E6-F685-4536-B5CF-93F704102025}"
 THUMBNAIL_HANDLER_KEY = "{E357FCCD-A995-4576-B01F-234630154E96}"
 ASSOC_CHANGED = 0x08000000
@@ -26,12 +27,42 @@ MODULES = {
         "extension": ".bip",
         "dll": KEYSHOT_DLL_NAME,
         "kind": "KeyShot",
+        "notice": "稳定模块：注册 KeyShot-ih.dll，并补齐 Windows 当前实际 ProgID 的 IconHandler。",
+        "steps": [
+            ("01", "自动扫描", "查找本机 KeyShot 安装目录。"),
+            ("02", "选择常用版本", "多版本时只选平时使用的版本。"),
+            ("03", "修复选中", "注册 KeyShot-ih.dll 并补齐文件关联。"),
+            ("04", "确认生效版本", "检查 Explorer 实际使用的 DLL。"),
+            ("05", "清缓存", "重启资源管理器并刷新缩略图。"),
+        ],
     },
     "rhino": {
         "label": "Rhino .3dm",
         "extension": ".3dm",
         "dll": RHINO_DLL_NAME,
         "kind": "Rhino",
+        "notice": "稳定模块：注册 RhinoHandlers.dll。若文件本身未保存预览图，注册成功后也可能只有图标。",
+        "steps": [
+            ("01", "自动扫描", "查找 Rhino 安装目录。"),
+            ("02", "选择常用版本", "多版本时选择平时打开 .3dm 的版本。"),
+            ("03", "修复选中", "注册 System\\RhinoHandlers.dll。"),
+            ("04", "确认生效版本", "检查 .3dm 的处理器和生效 DLL。"),
+            ("05", "清缓存", "重启资源管理器并刷新缩略图。"),
+        ],
+    },
+    "blender": {
+        "label": "Blender .blend",
+        "extension": ".blend",
+        "dll": BLENDER_DLL_NAME,
+        "kind": "Blender",
+        "notice": "稳定模块：注册 Blender 目录中的 BlendThumb.dll。缩略图还取决于 .blend 文件本身是否保存了预览。",
+        "steps": [
+            ("01", "自动扫描", "查找本机 BlendThumb.dll。"),
+            ("02", "选择版本", "选择需要负责打开 .blend 的 Blender。"),
+            ("03", "修复选中", "注册 BlendThumb.dll 缩略图组件。"),
+            ("04", "确认关联", "查看 .blend 当前 ProgID 和处理器。"),
+            ("05", "清缓存", "刷新 Explorer 并重新打开文件夹。"),
+        ],
     },
 }
 
@@ -171,6 +202,63 @@ def add_found_rhino(found, path, source):
         "dll": os.path.join(install_path, "System", RHINO_DLL_NAME),
         "module": "rhino",
     }
+
+
+def normalize_blender_install_path(path):
+    if not path:
+        return None
+
+    path = os.path.expandvars(str(path).strip().strip('"'))
+    if not path:
+        return None
+
+    if path.lower().endswith(".exe") or path.lower().endswith(".dll"):
+        path = os.path.dirname(path)
+
+    candidates = [
+        path,
+        os.path.dirname(path),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        dll_path = os.path.join(candidate, BLENDER_DLL_NAME)
+        if os.path.isfile(dll_path):
+            return candidate
+    return None
+
+
+def add_found_blender(found, path, source):
+    install_path = normalize_blender_install_path(path)
+    if not install_path:
+        return
+    key = os.path.normcase(os.path.normpath(install_path))
+    found[key] = {
+        "name": make_display_name(install_path),
+        "path": install_path,
+        "source": source,
+        "dll": os.path.join(install_path, BLENDER_DLL_NAME),
+        "module": "blender",
+    }
+
+
+def add_blender_dlls_under(found, root, source, max_depth=4):
+    if not root or not os.path.isdir(root):
+        return
+    root = os.path.abspath(root)
+    root_depth = root.rstrip("\\/").count(os.sep)
+    for current, dirs, files in os.walk(root):
+        depth = current.rstrip("\\/").count(os.sep) - root_depth
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            name for name in dirs
+            if name.lower() not in {"__pycache__", "scripts", "addons", "datafiles"}
+        ]
+        if BLENDER_DLL_NAME in files:
+            add_found_blender(found, os.path.join(current, BLENDER_DLL_NAME), source)
 
 
 def read_registry_value(root, path, value_name):
@@ -323,6 +411,79 @@ def scan_rhino_installations():
                             add_found_rhino(found, os.path.join(full, sub_item), "常见目录")
                     except Exception:
                         pass
+        except Exception:
+            continue
+
+    result = list(found.values())
+    result.sort(key=lambda item: item["path"].lower())
+    return result
+
+
+def scan_blender_installations():
+    found = {}
+    roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+    uninstall_paths = [
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ]
+    app_paths = [
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\blender.exe",
+        r"SOFTWARE\Classes\Applications\blender.exe\shell\open\command",
+    ]
+
+    for root in roots:
+        for reg_path in app_paths:
+            for value_name in ("", "Path"):
+                value = read_registry_value(root, reg_path, value_name)
+                if value:
+                    add_found_blender(found, value.split('"')[1] if '"' in value else value.split(" ")[0], "注册表")
+
+        for uninstall_root in uninstall_paths:
+            try:
+                with winreg.OpenKey(root, uninstall_root, 0, winreg.KEY_READ) as key:
+                    count = winreg.QueryInfoKey(key)[0]
+                    for index in range(count):
+                        try:
+                            sub_name = winreg.EnumKey(key, index)
+                            sub_path = uninstall_root + "\\" + sub_name
+                            display_name = read_registry_value(root, sub_path, "DisplayName")
+                            if not display_name or "blender" not in display_name.lower():
+                                continue
+                            for value_name in ("InstallLocation", "InstallDir", "DisplayIcon", "UninstallString"):
+                                value = read_registry_value(root, sub_path, value_name)
+                                if value:
+                                    add_found_blender(found, value.split(",")[0], "卸载信息")
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+    roots_to_scan = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        value = os.environ.get(env_name)
+        if value and os.path.isdir(value):
+            roots_to_scan.append(value)
+            bf = os.path.join(value, "Blender Foundation")
+            if os.path.isdir(bf):
+                roots_to_scan.append(bf)
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = letter + ":\\"
+        if os.path.isdir(drive):
+            roots_to_scan.append(drive)
+
+    seen = set()
+    for root in roots_to_scan:
+        key = os.path.normcase(os.path.normpath(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            for item in os.listdir(root):
+                full = os.path.join(root, item)
+                lower = item.lower()
+                if os.path.isdir(full) and "blender" in lower:
+                    add_found_blender(found, full, "常见目录")
+                    add_blender_dlls_under(found, full, "常见目录")
         except Exception:
             continue
 
@@ -527,9 +688,13 @@ def get_active_handler_info(module_key):
     prog_id = registry_get_default(extension) or "未设置"
     choice = user_choice_prog_id(extension)
     active_prog_id = choice or prog_id
-    icon_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\IconHandler") if active_prog_id != "未设置" else None
-    thumbnail_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\{}".format(THUMBNAIL_HANDLER_KEY)) if active_prog_id != "未设置" else None
-    clsid = icon_handler or thumbnail_handler or "未设置"
+    active_icon_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\IconHandler") if active_prog_id != "未设置" else None
+    active_thumbnail_handler = registry_get_default(str(active_prog_id) + r"\ShellEx\{}".format(THUMBNAIL_HANDLER_KEY)) if active_prog_id != "未设置" else None
+    extension_icon_handler = registry_get_default(extension + r"\ShellEx\IconHandler")
+    extension_thumbnail_handler = registry_get_default(extension + r"\ShellEx\{}".format(THUMBNAIL_HANDLER_KEY))
+    icon_handler = active_icon_handler or extension_icon_handler
+    thumbnail_handler = active_thumbnail_handler or extension_thumbnail_handler
+    clsid = thumbnail_handler or icon_handler or "未设置"
     inproc = registry_get_default(r"CLSID\{}\InProcServer32".format(clsid)) if clsid != "未设置" else None
     return {
         "prog_id": prog_id,
@@ -659,17 +824,25 @@ class FixerApp:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=24)
 
-        step_box = tk.Frame(left, bg=self.colors["charcoal"])
-        step_box.pack(fill=tk.X, padx=20, pady=(28, 10))
-        self.add_step(step_box, "01", "自动扫描", "查找本机 KeyShot 安装目录。")
-        self.add_step(step_box, "02", "选择常用版本", "多版本时只选平时使用的版本。")
-        self.add_step(step_box, "03", "修复选中", "注册预览组件并补齐文件关联。")
-        self.add_step(step_box, "04", "确认生效版本", "检查 Explorer 实际使用的 DLL。")
-        self.add_step(step_box, "05", "清缓存", "重启资源管理器并刷新缩略图。")
+        self.step_box = tk.Frame(left, bg=self.colors["charcoal"])
+        self.step_box.pack(fill=tk.X, padx=20, pady=(28, 10))
+
+        self.module_notice_label = tk.Label(
+            left,
+            text="",
+            bg="#343a35",
+            fg="#e9e0d4",
+            font=("Microsoft YaHei UI", 8),
+            wraplength=245,
+            justify=tk.LEFT,
+            padx=12,
+            pady=10,
+        )
+        self.module_notice_label.pack(fill=tk.X, padx=20, pady=(4, 10))
 
         tk.Label(
             left,
-            text="非官方独立工具\n不包含或分发 KeyShot 官方文件",
+            text="非官方独立工具\n不包含或分发软件官方文件",
             bg=self.colors["charcoal"],
             fg="#aaa397",
             font=("Microsoft YaHei UI", 8),
@@ -709,7 +882,7 @@ class FixerApp:
         )
         self.module_combo.pack(side=tk.LEFT)
         self.module_combo.bind("<<ComboboxSelected>>", self.on_module_changed)
-        ttk.Label(module_row, text="KeyShot .bip / Rhino .3dm", style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(module_row, text="KeyShot .bip / Rhino .3dm / Blender .blend", style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0))
 
         row1 = ttk.Frame(action_card, style="Card.TFrame")
         row1.pack(fill=tk.X)
@@ -803,6 +976,15 @@ class FixerApp:
         module = MODULES[self.current_module_key()]
         self.list_title.config(text="已发现的 {} 安装目录".format(module["kind"]))
         self.status_var.set("当前模块：{}。点击“自动扫描”，或手动添加安装目录。".format(module["label"]))
+        self.rebuild_module_steps()
+
+    def rebuild_module_steps(self):
+        for child in self.step_box.winfo_children():
+            child.destroy()
+        module = MODULES[self.current_module_key()]
+        for number, title, desc in module["steps"]:
+            self.add_step(self.step_box, number, title, desc)
+        self.module_notice_label.config(text=module["notice"])
 
     def on_module_changed(self, event=None):
         self.items = []
@@ -909,6 +1091,8 @@ class FixerApp:
         def worker():
             if module_key == "rhino":
                 result = scan_rhino_installations()
+            elif module_key == "blender":
+                result = scan_blender_installations()
             else:
                 result = scan_keyshot_installations()
             self.enqueue("scan_done", result)
@@ -931,11 +1115,19 @@ class FixerApp:
         if module_key == "rhino":
             install_path = normalize_rhino_install_path(path)
             dll_path = os.path.join(install_path, "System", RHINO_DLL_NAME) if install_path else ""
+        elif module_key == "blender":
+            install_path = normalize_blender_install_path(path)
+            dll_path = os.path.join(install_path, BLENDER_DLL_NAME) if install_path else ""
         else:
             install_path = normalize_keyshot_install_path(path)
             dll_path = os.path.join(install_path, "bin", KEYSHOT_DLL_NAME) if install_path else ""
         if not install_path:
-            expected = "System\\{}".format(RHINO_DLL_NAME) if module_key == "rhino" else "bin\\{}".format(KEYSHOT_DLL_NAME)
+            if module_key == "rhino":
+                expected = "System\\{}".format(RHINO_DLL_NAME)
+            elif module_key == "blender":
+                expected = BLENDER_DLL_NAME
+            else:
+                expected = "bin\\{}".format(KEYSHOT_DLL_NAME)
             messagebox.showerror("路径无效", "所选目录下没有找到 {}，请选择正确的安装根目录。".format(expected))
             return
         item = {
@@ -955,7 +1147,7 @@ class FixerApp:
     def delete_selected(self):
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("请选择", "请先在列表中选中一个 KeyShot 目录。")
+            messagebox.showwarning("请选择", "请先在列表中选中一个安装目录。")
             return
         selected_paths = {self.tree.item(item, "values")[1] for item in selected}
         self.items = [item for item in self.items if item["path"] not in selected_paths]
@@ -968,7 +1160,7 @@ class FixerApp:
     def fix_selected(self):
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("请选择", "请先选中你常用或最新的 KeyShot 版本。")
+            messagebox.showwarning("请选择", "请先选中你常用或最新的软件版本。")
             return
         selected_paths = {self.tree.item(item, "values")[1] for item in selected}
         items = [item for item in self.items if item["path"] in selected_paths]
@@ -978,7 +1170,7 @@ class FixerApp:
         if self.worker_running:
             return
         if not items:
-            messagebox.showwarning("列表为空", "请先自动扫描或手动添加 KeyShot 安装目录。")
+            messagebox.showwarning("列表为空", "请先自动扫描或手动添加安装目录。")
             return
         if not is_admin():
             messagebox.showerror(APP_TITLE, "当前不是管理员权限，请重新打开工具并允许管理员授权。")
@@ -1008,6 +1200,9 @@ class FixerApp:
             if module_key == "keyshot":
                 ok, message = ensure_bip_file_association()
                 self.enqueue("log", ("成功：" if ok else "失败：") + message)
+            elif module_key == "blender":
+                refresh_shell_associations()
+                self.enqueue("log", "已注册 BlendThumb.dll 并刷新 Windows Shell 文件关联。")
             else:
                 refresh_shell_associations()
                 self.enqueue("log", "已刷新 Windows Shell 文件关联。Rhino 的 .3dm 关联通常由 RhinoHandlers.dll 注册时写入。")
@@ -1019,6 +1214,8 @@ class FixerApp:
             self.enqueue("log", "当前图标处理器：{}".format(active["icon_handler"]))
             self.enqueue("log", "当前缩略图处理器：{}".format(active["thumbnail_handler"]))
             self.enqueue("log", "当前生效 DLL：{}".format(active["inproc"]))
+            if module_key == "blender" and active["thumbnail_handler"] == "未设置":
+                self.enqueue("log", "提示：当前 .blend 没有检测到 ThumbnailHandler。请确认选择的 Blender 目录里有 BlendThumb.dll，并导出诊断报告。")
             self.enqueue("fix_done", {"success": success, "total": total})
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1117,6 +1314,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
 
 
 
